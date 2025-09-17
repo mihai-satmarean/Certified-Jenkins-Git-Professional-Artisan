@@ -1,0 +1,76 @@
+pipeline {
+    agent any
+    
+    environment {
+        DOCKER_REGISTRY = 'ghcr.io/mihai-satmarean'
+        IMAGE_NAME = 'certified-jenkins-git-artisan'
+        IMAGE_TAG = "${BUILD_NUMBER}"
+        ANSIBLE_INVENTORY = 'inventory.ini'
+        ANSIBLE_PLAYBOOK_DIR = 'ansible'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    docker.build("${IMAGE_NAME}:${IMAGE_TAG}", "-f Dockerfile .")
+                    docker.image("${IMAGE_NAME}:${IMAGE_TAG}").push()
+                }
+            }
+        }
+        
+        stage('Test Application') {
+            steps {
+                sh 'mvn test'
+            }
+        }
+        
+        stage('Deploy with Ansible') {
+            steps {
+                script {
+                    // Execute Ansible playbook on Control Node
+                    sh '''
+                        ssh ubuntu@51.21.130.186 "cd /home/ubuntu/ansible/playbooks && ansible-playbook -i /home/ubuntu/ansible/inventory/hosts deploy-app.yml \
+                            --extra-vars 'jenkins_app_name= \
+                            jenkins_build_number= \
+                            jenkins_docker_registry= \
+                            jenkins_app_port=8080 \
+                            jenkins_spring_profile=production'"
+                    '''
+                }
+            }
+        }
+        
+        stage('Verify Deployment') {
+            steps {
+                script {
+                    // Verify deployment using Ansible on Control Node
+                    sh '''
+                        ssh ubuntu@51.21.130.186 "ansible docker_hosts -i /home/ubuntu/ansible/inventory/hosts \
+                            -m uri \
+                            -a 'url=http://{{ ansible_host }}:8080/actuator/health method=GET'"
+                    '''
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            // Cleanup
+            sh "docker rmi ${IMAGE_NAME}:${IMAGE_TAG} || true"
+        }
+        success {
+            echo 'Deployment successful!'
+        }
+        failure {
+            echo 'Deployment failed!'
+        }
+    }
+}
