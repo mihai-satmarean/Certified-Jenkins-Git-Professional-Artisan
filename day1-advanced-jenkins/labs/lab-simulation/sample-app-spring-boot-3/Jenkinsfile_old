@@ -1,0 +1,49 @@
+pipeline {
+    agent {
+        label 'docker-host'
+    }
+    
+    environment {
+        DOCKER_REGISTRY = 'ghcr.io/mihai-satmarean'
+        IMAGE_NAME = 'certified-jenkins-git-artisan'
+        IMAGE_TAG = "${BUILD_NUMBER}"
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    def image = docker.build("${IMAGE_NAME}:${IMAGE_TAG}")
+                    docker.image("${IMAGE_NAME}:${IMAGE_TAG}").push()
+                }
+            }
+        }
+        
+        stage('Test Application') {
+            steps {
+                sh 'mvn test'
+            }
+        }
+        
+        stage('Deploy to Container') {
+            steps {
+                script {
+                    sh "docker run -d --name test-app-${BUILD_NUMBER} -p 8080:8080 ${IMAGE_NAME}:${IMAGE_TAG}"
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            sh "docker stop test-app-${BUILD_NUMBER} || true"
+            sh "docker rm test-app-${BUILD_NUMBER} || true"
+        }
+    }
+}
