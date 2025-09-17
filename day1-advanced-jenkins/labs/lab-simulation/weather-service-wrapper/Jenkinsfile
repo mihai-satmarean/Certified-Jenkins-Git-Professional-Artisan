@@ -1,0 +1,186 @@
+pipeline {
+    agent {
+        label 'docker-host'
+    }
+    
+    environment {
+        DOCKER_REGISTRY = 'ghcr.io/mihai-satmarean'
+        IMAGE_NAME = 'weather-service-wrapper'
+        IMAGE_TAG = "${BUILD_NUMBER}"
+        WEATHER_API_KEY = credentials('weather-api-key')
+        SONAR_TOKEN = credentials('sonar-token')
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.GIT_COMMIT_SHORT = sh(
+                        script: 'git rev-parse --short HEAD',
+                        returnStdout: true
+                    ).trim()
+                }
+            }
+        }
+        
+        stage('Code Quality') {
+            parallel {
+                stage('SonarQube Analysis') {
+                    steps {
+                        script {
+                            sh '''
+                                mvn sonar:sonar \
+                                    -Dsonar.projectKey=weather-service-wrapper \
+                                    -Dsonar.host.url=${SONAR_HOST_URL} \
+                                    -Dsonar.login=${SONAR_TOKEN} \
+                                    -Dsonar.java.binaries=target/classes
+                            '''
+                        }
+                    }
+                }
+                stage('Security Scan') {
+                    steps {
+                        script {
+                            sh 'mvn org.owasp:dependency-check-maven:check'
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Build & Test') {
+            steps {
+                script {
+                    sh 'mvn clean compile test'
+                }
+            }
+            post {
+                always {
+                    publishTestResults testResultsPattern: 'target/surefire-reports/*.xml'
+                    publishCoverage adapters: [jacocoAdapter('target/site/jacoco/jacoco.xml')]
+                }
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    def image = docker.build("${IMAGE_NAME}:${IMAGE_TAG}")
+                    docker.image("${IMAGE_NAME}:${IMAGE_TAG}").push()
+                    
+                    // Tag with git commit
+                    sh "docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:${GIT_COMMIT_SHORT}"
+                    docker.image("${IMAGE_NAME}:${GIT_COMMIT_SHORT}").push()
+                }
+            }
+        }
+        
+        stage('Security Scan Image') {
+            steps {
+                script {
+                    sh '''
+                        trivy image --exit-code 0 --severity HIGH,CRITICAL \
+                            --format table \
+                            ${IMAGE_NAME}:${IMAGE_TAG}
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy to Staging') {
+            steps {
+                script {
+                    sh """
+                        docker run -d --name weather-staging-${BUILD_NUMBER} \
+                            -p 8080:8080 \
+                            -e WEATHER_API_KEY=${WEATHER_API_KEY} \
+                            ${IMAGE_NAME}:${IMAGE_TAG}
+                    """
+                }
+            }
+        }
+        
+        stage('Integration Tests') {
+            steps {
+                script {
+                    sh '''
+                        sleep 30
+                        curl -f http://localhost:8080/actuator/health
+                        curl -f "http://localhost:8080/api/weather?city=Bucharest&useRealApi=false"
+                        curl -f "http://localhost:8080/api/weather?city=London&useRealApi=true"
+                    '''
+                }
+            }
+        }
+        
+        stage('Performance Tests') {
+            steps {
+                script {
+                    sh '''
+                        # Simple load test with curl
+                        for i in {1..10}; do
+                            curl -s "http://localhost:8080/api/weather?city=Bucharest&useRealApi=false" > /dev/null &
+                        done
+                        wait
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy to Production') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    sh """
+                        docker run -d --name weather-prod-${BUILD_NUMBER} \
+                            -p 8081:8080 \
+                            -e WEATHER_API_KEY=${WEATHER_API_KEY} \
+                            -e SPRING_PROFILES_ACTIVE=prod \
+                            ${IMAGE_NAME}:${IMAGE_TAG}
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                sh """
+                    docker stop weather-staging-${BUILD_NUMBER} || true
+                    docker rm weather-staging-${BUILD_NUMBER} || true
+                """
+            }
+            cleanWs()
+        }
+        success {
+            script {
+                def message = """
+                    ✅ Weather Service Wrapper Build #${BUILD_NUMBER} Successful!
+                    
+                    🚀 Deployed to:
+                    - Staging: http://staging.weather-service.com
+                    - Production: http://weather-service.com
+                    
+                    📊 Image: ${IMAGE_NAME}:${IMAGE_TAG}
+                    🔗 Commit: ${GIT_COMMIT_SHORT}
+                """
+                echo message
+            }
+        }
+        failure {
+            script {
+                def message = """
+                    ❌ Weather Service Wrapper Build #${BUILD_NUMBER} Failed!
+                    
+                    🔍 Check logs for details
+                    🔗 Commit: ${GIT_COMMIT_SHORT}
+                """
+                echo message
+            }
+        }
+    }
+}
