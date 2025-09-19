@@ -19,15 +19,23 @@ pipeline {
         stage('Build Docker Image') {
             steps {
                 script {
-                    docker.build("${IMAGE_NAME}:${IMAGE_TAG}", "-f Dockerfile .")
-                    docker.image("${IMAGE_NAME}:${IMAGE_TAG}").push()
+                    // Change to the correct directory where Dockerfile is located
+                    dir('day1-advanced-jenkins/labs/lab-simulation/sample-app-spring-boot-3') {
+                        docker.build("${IMAGE_NAME}:${IMAGE_TAG}", "-f Dockerfile .")
+                        docker.image("${IMAGE_NAME}:${IMAGE_TAG}").push()
+                    }
                 }
             }
         }
         
         stage('Test Application') {
             steps {
-                sh 'mvn test'
+                script {
+                    // Change to the correct directory for Maven build
+                    dir('day1-advanced-jenkins/labs/lab-simulation/sample-app-spring-boot-3') {
+                        sh 'mvn test'
+                    }
+                }
             }
         }
         
@@ -36,11 +44,11 @@ pipeline {
                 script {
                     // Execute Ansible playbook on Control Node
                     sh '''
-                        ssh ubuntu@51.21.130.186 "cd /home/ubuntu/ansible/playbooks && ansible-playbook -i /home/ubuntu/ansible/inventory/hosts deploy-app.yml \
-                            --extra-vars 'jenkins_app_name= \
-                            jenkins_build_number= \
-                            jenkins_docker_registry= \
-                            jenkins_app_port=8080 \
+                        ssh ubuntu@51.21.130.186 "cd /home/ubuntu/ansible/playbooks && ansible-playbook -i /home/ubuntu/ansible/inventory/hosts deploy-app.yml \\
+                            --extra-vars 'jenkins_app_name=${IMAGE_NAME} \\
+                            jenkins_build_number=${BUILD_NUMBER} \\
+                            jenkins_docker_registry=${DOCKER_REGISTRY} \\
+                            jenkins_app_port=8080 \\
                             jenkins_spring_profile=production'"
                     '''
                 }
@@ -52,8 +60,8 @@ pipeline {
                 script {
                     // Verify deployment using Ansible on Control Node
                     sh '''
-                        ssh ubuntu@51.21.130.186 "ansible docker_hosts -i /home/ubuntu/ansible/inventory/hosts \
-                            -m uri \
+                        ssh ubuntu@51.21.130.186 "ansible docker_hosts -i /home/ubuntu/ansible/inventory/hosts \\
+                            -m uri \\
                             -a 'url=http://{{ ansible_host }}:8080/actuator/health method=GET'"
                     '''
                 }
